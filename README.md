@@ -24,7 +24,7 @@ so everyone ends up with the same data.
 
 ## Roadmap
 
-- [ ] Server engine: ordered, idempotent push and compacted pull
+- [x] Server engine: ordered, idempotent push and compacted pull
 - [ ] SQLite storage
 - [ ] HTTP API
 - [ ] Client with offline queue, optimistic writes and rebase
