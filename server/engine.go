@@ -2,140 +2,138 @@
 package server
 
 import (
-	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
-	"slices"
-	"sync"
 
+	"github.com/dakribe/sync-engine/store"
 	"github.com/dakribe/sync-engine/wire"
 )
 
 // ErrNoClientID is returned when a request doesn't say which client sent it.
 var ErrNoClientID = errors.New("request has no client id")
 
-type recordKey struct {
-	collection string
-	id         string
-}
-
 // Engine holds the authoritative data. Every applied mutation gets the next version
 // number, and each record remembers the version that last changed it, so a pull only has
 // to find records newer than the client's cursor.
 type Engine struct {
-	mu      sync.Mutex
-	version uint64
-	records map[recordKey]*wire.Record
-	lastSeq map[string]uint64 // per client: the last mutation applied
+	store store.Store
 }
 
-// NewEngine returns an empty engine at version 0.
-func NewEngine() *Engine {
-	return &Engine{
-		records: make(map[recordKey]*wire.Record),
-		lastSeq: make(map[string]uint64),
-	}
+// NewEngine returns an engine that keeps its data in s.
+func NewEngine(s store.Store) *Engine {
+	return &Engine{store: s}
 }
 
-// Push applies a client's mutations in order. Mutations the server has already applied
-// are skipped, so retrying a push is safe. Processing stops at the first gap in sequence
-// numbers, because applying a later mutation before an earlier one would break the
-// client's order; the client resends from LastSeq+1. Invalid mutations are rejected but
-// still count as processed.
-func (e *Engine) Push(req wire.PushRequest) (wire.PushResponse, error) {
+// Push applies a client's mutations in order, in one transaction. Mutations the server
+// has already applied are skipped, so retrying a push is safe. Processing stops at the
+// first gap in sequence numbers, because applying a later mutation before an earlier one
+// would break the client's order; the client resends from LastSeq+1. Invalid mutations are
+// rejected but still count as processed.
+func (e *Engine) Push(ctx context.Context, req wire.PushRequest) (wire.PushResponse, error) {
 	if req.ClientID == "" {
 		return wire.PushResponse{}, ErrNoClientID
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	var resp wire.PushResponse
-	for _, m := range req.Mutations {
-		last := e.lastSeq[req.ClientID]
-		if m.Seq <= last {
-			continue // already applied
+	err := e.store.Update(ctx, func(tx store.Tx) error {
+		resp = wire.PushResponse{}
+		last, err := tx.LastSeq(req.ClientID)
+		if err != nil {
+			return err
 		}
-		if m.Seq != last+1 {
-			break // gap: wait for the missing mutation
+		version, err := tx.Version()
+		if err != nil {
+			return err
 		}
-		if err := m.Validate(); err != nil {
-			resp.Rejected = append(resp.Rejected, wire.Rejection{Seq: m.Seq, Reason: err.Error()})
-		} else {
-			e.apply(m)
+
+		start := last
+		for _, m := range req.Mutations {
+			if m.Seq <= last {
+				continue // already applied
+			}
+			if m.Seq != last+1 {
+				break // gap: wait for the missing mutation
+			}
+			if err := m.Validate(); err != nil {
+				resp.Rejected = append(resp.Rejected, wire.Rejection{Seq: m.Seq, Reason: err.Error()})
+			} else {
+				version++
+				if err := apply(tx, version, m); err != nil {
+					return err
+				}
+			}
+			last = m.Seq
 		}
-		e.lastSeq[req.ClientID] = m.Seq
+		resp.LastSeq = last
+
+		if last == start {
+			return nil // nothing new
+		}
+		if err := tx.SetVersion(version); err != nil {
+			return err
+		}
+		return tx.SetLastSeq(req.ClientID, last)
+	})
+	if err != nil {
+		return wire.PushResponse{}, err
 	}
-	resp.LastSeq = e.lastSeq[req.ClientID]
 	return resp, nil
 }
 
-// apply runs a valid mutation's ops under one new version. The caller holds e.mu.
-func (e *Engine) apply(m wire.Mutation) {
-	e.version++
+// apply runs a valid mutation's ops under the given version.
+func apply(tx store.Tx, version uint64, m wire.Mutation) error {
 	for _, op := range m.Ops {
-		key := recordKey{op.Collection, op.ID}
-		rec := e.records[key]
+		rec, ok, err := tx.Record(op.Collection, op.ID)
+		if err != nil {
+			return err
+		}
 		switch op.Kind {
 		case wire.OpPut:
-			if rec == nil || rec.Deleted {
+			if !ok || rec.Deleted {
 				// A put on a missing or deleted record starts it fresh.
-				rec = &wire.Record{Collection: op.Collection, ID: op.ID, Fields: map[string]json.RawMessage{}}
-				e.records[key] = rec
+				rec = wire.Record{Collection: op.Collection, ID: op.ID, Fields: map[string]json.RawMessage{}}
 			}
 			for name, value := range op.Fields {
-				rec.Fields[name] = slices.Clone(value)
+				rec.Fields[name] = value
 			}
 		case wire.OpDelete:
-			if rec == nil || rec.Deleted {
+			if !ok || rec.Deleted {
 				continue
 			}
 			rec.Deleted = true
 			rec.Fields = nil
 		}
-		rec.Version = e.version
+		rec.Version = version
+		if err := tx.PutRecord(rec); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // Pull returns the current state of every record changed after req.Since, oldest change
 // first. A record changed many times appears once, so a client that was offline for a
 // long time downloads the data it needs, not its history.
-func (e *Engine) Pull(req wire.PullRequest) (wire.PullResponse, error) {
+func (e *Engine) Pull(ctx context.Context, req wire.PullRequest) (wire.PullResponse, error) {
 	if req.ClientID == "" {
 		return wire.PullResponse{}, ErrNoClientID
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	resp := wire.PullResponse{
-		Version: e.version,
-		LastSeq: e.lastSeq[req.ClientID],
-		Records: []wire.Record{},
-	}
-	for _, rec := range e.records {
-		if rec.Version > req.Since {
-			resp.Records = append(resp.Records, cloneRecord(rec))
+	var resp wire.PullResponse
+	err := e.store.View(ctx, func(tx store.Tx) error {
+		var err error
+		if resp.Version, err = tx.Version(); err != nil {
+			return err
 		}
-	}
-	slices.SortFunc(resp.Records, func(a, b wire.Record) int {
-		return cmp.Or(
-			cmp.Compare(a.Version, b.Version),
-			cmp.Compare(a.Collection, b.Collection),
-			cmp.Compare(a.ID, b.ID),
-		)
+		if resp.LastSeq, err = tx.LastSeq(req.ClientID); err != nil {
+			return err
+		}
+		resp.Records, err = tx.ChangedSince(req.Since)
+		return err
 	})
-	return resp, nil
-}
-
-// cloneRecord copies a record so callers can't change the engine's data.
-func cloneRecord(rec *wire.Record) wire.Record {
-	out := *rec
-	if rec.Fields != nil {
-		out.Fields = make(map[string]json.RawMessage, len(rec.Fields))
-		for name, value := range rec.Fields {
-			out.Fields[name] = slices.Clone(value)
-		}
+	if err != nil {
+		return wire.PullResponse{}, err
 	}
-	return out
+	return resp, nil
 }

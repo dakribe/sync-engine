@@ -2,11 +2,64 @@ package server
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/dakribe/sync-engine/store"
+	"github.com/dakribe/sync-engine/store/memory"
+	"github.com/dakribe/sync-engine/store/sqlite"
 	"github.com/dakribe/sync-engine/wire"
 )
+
+// stores are the store implementations every engine test runs against.
+var stores = []struct {
+	name string
+	open func(t *testing.T) store.Store
+}{
+	{"memory", func(*testing.T) store.Store { return memory.New() }},
+	{"sqlite", func(t *testing.T) store.Store {
+		s, err := sqlite.Open(filepath.Join(t.TempDir(), "sync.db"))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		return s
+	}},
+}
+
+var engineTests = []struct {
+	name string
+	run  func(t *testing.T, e *Engine)
+}{
+	{"PushThenPull", testPushThenPull},
+	{"PushIsIdempotent", testPushIsIdempotent},
+	{"PushStopsAtGap", testPushStopsAtGap},
+	{"SeqIsPerClient", testSeqIsPerClient},
+	{"InvalidMutationIsRejectedAndSkipped", testInvalidMutationIsRejectedAndSkipped},
+	{"MutationIsAtomic", testMutationIsAtomic},
+	{"PutMergesFields", testPutMergesFields},
+	{"DeleteSendsTombstone", testDeleteSendsTombstone},
+	{"PutAfterDeleteStartsFresh", testPutAfterDeleteStartsFresh},
+	{"PullIsCompacted", testPullIsCompacted},
+	{"PullFromCursorReturnsOnlyNewChanges", testPullFromCursorReturnsOnlyNewChanges},
+	{"PulledRecordsAreCopies", testPulledRecordsAreCopies},
+	{"RequestsNeedClientID", testRequestsNeedClientID},
+	{"ConcurrentPushes", testConcurrentPushes},
+}
+
+func TestEngine(t *testing.T) {
+	for _, st := range stores {
+		t.Run(st.name, func(t *testing.T) {
+			for _, tt := range engineTests {
+				t.Run(tt.name, func(t *testing.T) {
+					s := st.open(t)
+					t.Cleanup(func() { s.Close() })
+					tt.run(t, NewEngine(s))
+				})
+			}
+		})
+	}
+}
 
 func put(collection, id string, fields map[string]any) wire.Op {
 	raw := make(map[string]json.RawMessage, len(fields))
@@ -26,7 +79,7 @@ func del(collection, id string) wire.Op {
 
 func push(t *testing.T, e *Engine, client string, muts ...wire.Mutation) wire.PushResponse {
 	t.Helper()
-	resp, err := e.Push(wire.PushRequest{ClientID: client, Mutations: muts})
+	resp, err := e.Push(t.Context(), wire.PushRequest{ClientID: client, Mutations: muts})
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}
@@ -35,7 +88,7 @@ func push(t *testing.T, e *Engine, client string, muts ...wire.Mutation) wire.Pu
 
 func pull(t *testing.T, e *Engine, client string, since uint64) wire.PullResponse {
 	t.Helper()
-	resp, err := e.Pull(wire.PullRequest{ClientID: client, Since: since})
+	resp, err := e.Pull(t.Context(), wire.PullRequest{ClientID: client, Since: since})
 	if err != nil {
 		t.Fatalf("pull: %v", err)
 	}
@@ -55,8 +108,7 @@ func field(t *testing.T, rec wire.Record, name string) any {
 	return v
 }
 
-func TestPushThenPull(t *testing.T) {
-	e := NewEngine()
+func testPushThenPull(t *testing.T, e *Engine) {
 	resp := push(t, e, "a",
 		wire.Mutation{Seq: 1, Ops: []wire.Op{put("todos", "1", map[string]any{"title": "milk"})}},
 		wire.Mutation{Seq: 2, Ops: []wire.Op{put("todos", "2", map[string]any{"title": "eggs"})}},
@@ -77,8 +129,7 @@ func TestPushThenPull(t *testing.T) {
 	}
 }
 
-func TestPushIsIdempotent(t *testing.T) {
-	e := NewEngine()
+func testPushIsIdempotent(t *testing.T, e *Engine) {
 	m := wire.Mutation{Seq: 1, Ops: []wire.Op{put("counters", "c", map[string]any{"n": 1})}}
 	push(t, e, "a", m)
 	push(t, e, "a", m) // a retry after a lost response
@@ -88,8 +139,7 @@ func TestPushIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestPushStopsAtGap(t *testing.T) {
-	e := NewEngine()
+func testPushStopsAtGap(t *testing.T, e *Engine) {
 	resp := push(t, e, "a",
 		wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "1", map[string]any{"x": 1})}},
 		wire.Mutation{Seq: 3, Ops: []wire.Op{put("t", "3", map[string]any{"x": 3})}},
@@ -102,8 +152,7 @@ func TestPushStopsAtGap(t *testing.T) {
 	}
 }
 
-func TestSeqIsPerClient(t *testing.T) {
-	e := NewEngine()
+func testSeqIsPerClient(t *testing.T, e *Engine) {
 	push(t, e, "a", wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "a", map[string]any{"x": 1})}})
 	resp := push(t, e, "b", wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "b", map[string]any{"x": 1})}})
 	if resp.LastSeq != 1 {
@@ -114,8 +163,7 @@ func TestSeqIsPerClient(t *testing.T) {
 	}
 }
 
-func TestInvalidMutationIsRejectedAndSkipped(t *testing.T) {
-	e := NewEngine()
+func testInvalidMutationIsRejectedAndSkipped(t *testing.T, e *Engine) {
 	resp := push(t, e, "a",
 		wire.Mutation{Seq: 1, Ops: []wire.Op{{Kind: "rename", Collection: "t", ID: "1"}}},
 		wire.Mutation{Seq: 2, Ops: []wire.Op{put("t", "2", map[string]any{"x": 2})}},
@@ -131,8 +179,7 @@ func TestInvalidMutationIsRejectedAndSkipped(t *testing.T) {
 	}
 }
 
-func TestMutationIsAtomic(t *testing.T) {
-	e := NewEngine()
+func testMutationIsAtomic(t *testing.T, e *Engine) {
 	resp := push(t, e, "a", wire.Mutation{Seq: 1, Ops: []wire.Op{
 		put("t", "1", map[string]any{"x": 1}),
 		{Kind: wire.OpPut, Collection: "", ID: "2"},
@@ -145,8 +192,7 @@ func TestMutationIsAtomic(t *testing.T) {
 	}
 }
 
-func TestPutMergesFields(t *testing.T) {
-	e := NewEngine()
+func testPutMergesFields(t *testing.T, e *Engine) {
 	push(t, e, "a", wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "1", map[string]any{"title": "milk", "done": false})}})
 	push(t, e, "b", wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "1", map[string]any{"done": true})}})
 	push(t, e, "a", wire.Mutation{Seq: 2, Ops: []wire.Op{put("t", "1", map[string]any{"title": "oat milk"})}})
@@ -157,8 +203,7 @@ func TestPutMergesFields(t *testing.T) {
 	}
 }
 
-func TestDeleteSendsTombstone(t *testing.T) {
-	e := NewEngine()
+func testDeleteSendsTombstone(t *testing.T, e *Engine) {
 	push(t, e, "a", wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "1", map[string]any{"x": 1})}})
 	cursor := pull(t, e, "b", 0).Version
 	push(t, e, "a", wire.Mutation{Seq: 2, Ops: []wire.Op{del("t", "1")}})
@@ -169,8 +214,7 @@ func TestDeleteSendsTombstone(t *testing.T) {
 	}
 }
 
-func TestPutAfterDeleteStartsFresh(t *testing.T) {
-	e := NewEngine()
+func testPutAfterDeleteStartsFresh(t *testing.T, e *Engine) {
 	push(t, e, "a",
 		wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "1", map[string]any{"old": 1})}},
 		wire.Mutation{Seq: 2, Ops: []wire.Op{del("t", "1")}},
@@ -182,8 +226,7 @@ func TestPutAfterDeleteStartsFresh(t *testing.T) {
 	}
 }
 
-func TestPullIsCompacted(t *testing.T) {
-	e := NewEngine()
+func testPullIsCompacted(t *testing.T, e *Engine) {
 	for seq := uint64(1); seq <= 100; seq++ {
 		push(t, e, "a", wire.Mutation{Seq: seq, Ops: []wire.Op{put("counters", "c", map[string]any{"n": seq})}})
 	}
@@ -193,8 +236,7 @@ func TestPullIsCompacted(t *testing.T) {
 	}
 }
 
-func TestPullFromCursorReturnsOnlyNewChanges(t *testing.T) {
-	e := NewEngine()
+func testPullFromCursorReturnsOnlyNewChanges(t *testing.T, e *Engine) {
 	push(t, e, "a", wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "1", map[string]any{"x": 1})}})
 	cursor := pull(t, e, "b", 0).Version
 	push(t, e, "a", wire.Mutation{Seq: 2, Ops: []wire.Op{put("t", "2", map[string]any{"x": 2})}})
@@ -208,8 +250,7 @@ func TestPullFromCursorReturnsOnlyNewChanges(t *testing.T) {
 	}
 }
 
-func TestPulledRecordsAreCopies(t *testing.T) {
-	e := NewEngine()
+func testPulledRecordsAreCopies(t *testing.T, e *Engine) {
 	push(t, e, "a", wire.Mutation{Seq: 1, Ops: []wire.Op{put("t", "1", map[string]any{"x": 1})}})
 	pull(t, e, "a", 0).Records[0].Fields["x"][0] = '9'
 
@@ -218,18 +259,16 @@ func TestPulledRecordsAreCopies(t *testing.T) {
 	}
 }
 
-func TestRequestsNeedClientID(t *testing.T) {
-	e := NewEngine()
-	if _, err := e.Push(wire.PushRequest{}); err != ErrNoClientID {
+func testRequestsNeedClientID(t *testing.T, e *Engine) {
+	if _, err := e.Push(t.Context(), wire.PushRequest{}); err != ErrNoClientID {
 		t.Fatalf("push err = %v, want ErrNoClientID", err)
 	}
-	if _, err := e.Pull(wire.PullRequest{}); err != ErrNoClientID {
+	if _, err := e.Pull(t.Context(), wire.PullRequest{}); err != ErrNoClientID {
 		t.Fatalf("pull err = %v, want ErrNoClientID", err)
 	}
 }
 
-func TestConcurrentPushes(t *testing.T) {
-	e := NewEngine()
+func testConcurrentPushes(t *testing.T, e *Engine) {
 	const clients, perClient = 8, 50
 	var wg sync.WaitGroup
 	for c := range clients {
