@@ -7,6 +7,47 @@ offline. Changes are queued and pushed to a server, which puts every client's ch
 order and sends the result back out. Clients then replay their own unconfirmed changes on top,
 so everyone ends up with the same data.
 
+## Performance
+
+Measured on an Apple M1 Pro (10 cores), with clients and server on the same machine, the
+server on SQLite with every commit synced to disk.
+
+**End to end over HTTP** (`go run ./cmd/syncbench`): real clients with live updates
+against a real server.
+
+| | 50 clients | 200 clients |
+|---|---|---|
+| A write on one client visible on all others, p50 | 2.1 ms | 4.7 ms |
+| p99 | 5.1 ms | 9.1 ms |
+| Every client writes at once: writes confirmed per second | 14,100 | 4,200 |
+| ...and every client holds every record after | 0.47 s (5,000 writes) | 3.4 s (10,000 writes) |
+
+With 200 clients writing at once, each new version makes all 200 pull, so reads
+dominate. That's the cost of fanning every change out to every client.
+
+**Server** (`go test -bench . ./server`), SQLite:
+
+| Operation | Result |
+|---|---|
+| Push, one mutation per request | 8,000 mutations/s |
+| Push, 16 clients at once (group commit) | 27,700 mutations/s, up from 6,700 without |
+| Push, 100 mutations per request | 41,600 mutations/s |
+| Pull a 1,000-record page out of 100,000 records | 2.6 ms |
+| Pull the last 10 changes out of 100,000 records | 0.06 ms |
+
+**Client** (`go test -bench . ./client`):
+
+| Operation | Result |
+|---|---|
+| Local write, in memory | 1.5 µs |
+| Local write, saved to disk | 75 µs |
+| Read a record out of 100,000 | 0.5 µs |
+| Rebase 10 pending mutations over 1,000 records | 6.7 µs |
+| Rebase 10 pending mutations over 100,000 records | 5.8 µs |
+
+Rebase cost doesn't grow with the data, because it only copies the records pending
+mutations touch.
+
 ## How it works
 
 - **Mutations.** A client groups its changes into a mutation: one or more puts or deletes on
@@ -158,6 +199,7 @@ store/memory/   In-memory storage
 internal/       Shared SQLite setup and migrations
 sim/            Whole-system simulation tests
 cmd/syncd/      The server program
+cmd/syncbench/  End-to-end benchmark over HTTP
 ```
 
 ## Roadmap
@@ -168,7 +210,7 @@ cmd/syncd/      The server program
 - [x] Client with offline queue, optimistic writes and rebase
 - [x] Live updates over server-sent events
 - [x] Simulation tests with many clients over an unreliable network
-- [ ] Benchmarks
+- [x] Benchmarks
 - [ ] Demo app
 
 ## Build and test
