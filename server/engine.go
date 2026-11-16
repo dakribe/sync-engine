@@ -2,9 +2,11 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 
 	"github.com/dakribe/sync-engine/store"
 	"github.com/dakribe/sync-engine/wire"
@@ -112,28 +114,80 @@ func apply(tx store.Tx, version uint64, m wire.Mutation) error {
 	return nil
 }
 
-// Pull returns the current state of every record changed after req.Since, oldest change
+// Page sizes for Pull.
+const (
+	DefaultPullLimit = 1000
+	MaxPullLimit     = 10000
+)
+
+// Pull returns the current state of the records changed after req.Since, oldest change
 // first. A record changed many times appears once, so a client that was offline for a
 // long time downloads the data it needs, not its history.
+//
+// Large results come in pages. A page never splits a mutation: it ends just before the
+// mutation that would cross the limit, or, if a single mutation is bigger than a page,
+// holds all of that mutation. So every page leaves the client with a state the server
+// actually passed through.
 func (e *Engine) Pull(ctx context.Context, req wire.PullRequest) (wire.PullResponse, error) {
 	if req.ClientID == "" {
 		return wire.PullResponse{}, ErrNoClientID
 	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = DefaultPullLimit
+	}
+	limit = min(limit, MaxPullLimit)
 
 	var resp wire.PullResponse
 	err := e.store.View(ctx, func(tx store.Tx) error {
-		var err error
-		if resp.Version, err = tx.Version(); err != nil {
+		current, err := tx.Version()
+		if err != nil {
 			return err
 		}
+		resp = wire.PullResponse{Version: current}
 		if resp.LastSeq, err = tx.LastSeq(req.ClientID); err != nil {
 			return err
 		}
-		resp.Records, err = tx.ChangedSince(req.Since)
-		return err
+		if req.Since >= current {
+			resp.Records = []wire.Record{}
+			return nil
+		}
+
+		// Read one extra record to learn whether the page ends inside a mutation.
+		recs, err := tx.Changes(req.Since, current, limit+1)
+		if err != nil {
+			return err
+		}
+		if len(recs) <= limit {
+			resp.Records = recs
+			return nil
+		}
+
+		last := recs[limit-1].Version
+		if recs[limit].Version != last {
+			resp.Records, resp.Version = recs[:limit], last
+		} else if i := firstAtVersion(recs, last); i > 0 {
+			// Stop before the mutation that crosses the limit.
+			resp.Records, resp.Version = recs[:i], recs[i-1].Version
+		} else {
+			// One mutation is bigger than a page: send all of it.
+			if resp.Records, err = tx.Changes(req.Since, last, 0); err != nil {
+				return err
+			}
+			resp.Version = last
+		}
+		resp.More = resp.Version < current
+		return nil
 	})
 	if err != nil {
 		return wire.PullResponse{}, err
 	}
 	return resp, nil
+}
+
+// firstAtVersion returns the index of the first record with version v. recs is sorted by
+// version and contains v.
+func firstAtVersion(recs []wire.Record, v uint64) int {
+	i, _ := slices.BinarySearchFunc(recs, v, func(r wire.Record, v uint64) int { return cmp.Compare(r.Version, v) })
+	return i
 }

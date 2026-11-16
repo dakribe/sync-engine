@@ -39,8 +39,8 @@ func TestUpdateSeesItsOwnWrites(t *testing.T) {
 		if _, ok, _ := tx.Record("t", "1"); !ok {
 			t.Error("record written in this transaction is missing")
 		}
-		if recs, _ := tx.ChangedSince(0); len(recs) != 1 {
-			t.Errorf("ChangedSince = %d records, want 1", len(recs))
+		if recs, _ := tx.Changes(0, 1, 0); len(recs) != 1 {
+			t.Errorf("Changes = %d records, want 1", len(recs))
 		}
 		return nil
 	})

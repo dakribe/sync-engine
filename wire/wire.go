@@ -51,10 +51,12 @@ type PushResponse struct {
 	Rejected []Rejection `json:"rejected,omitempty"`
 }
 
-// PullRequest asks for every change after version Since.
+// PullRequest asks for the changes after version Since. Limit caps the records in the
+// response; 0 asks for the server's default page size.
 type PullRequest struct {
 	ClientID string `json:"clientId"`
 	Since    uint64 `json:"since"`
+	Limit    int    `json:"limit,omitempty"`
 }
 
 // Record is the current state of one record. Deleted records are sent as tombstones so
@@ -67,13 +69,15 @@ type Record struct {
 	Version    uint64                     `json:"version"`
 }
 
-// PullResponse holds every record that changed after the requested version, oldest change
-// first. Version is the cursor for the next pull, and LastSeq is the last of this client's
-// mutations the data includes.
+// PullResponse holds the records that changed after the requested version, oldest change
+// first. Version is the cursor for the next pull. If More is set, there are newer changes
+// and the client should pull again from Version. LastSeq is the last of this client's
+// mutations the server has applied; it only describes the data once More is false.
 type PullResponse struct {
 	Version uint64   `json:"version"`
 	LastSeq uint64   `json:"lastSeq"`
 	Records []Record `json:"records"`
+	More    bool     `json:"more,omitempty"`
 }
 
 // Validate reports whether the op is well formed.

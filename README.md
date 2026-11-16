@@ -17,6 +17,9 @@ so everyone ends up with the same data.
 - **Pull.** The client asks for everything that changed since its last version. The server
   answers with the current state of each changed record, not every step that led there, plus
   the last mutation it applied for that client.
+- **Pages.** Large pulls come in pages of up to 1,000 records (the client can ask for up to
+  10,000). A page never splits a mutation, so after every page the client holds a state the
+  server actually passed through. The client keeps pulling while `more` is set.
 - **Rebase.** The client drops the mutations the server confirmed and replays the rest on top
   of the server's data.
 - **Conflicts.** The server's order decides. A put changes only the fields it names, so two
@@ -29,7 +32,7 @@ JSON over HTTP. Errors are objects with an `"error"` field, and bodies are cappe
 | Endpoint | Request | Response |
 |---|---|---|
 | `POST /push` | `{"clientId", "mutations": [{"seq", "ops": [...]}]}` | `{"lastSeq", "rejected"}` |
-| `POST /pull` | `{"clientId", "since"}` | `{"version", "lastSeq", "records"}` |
+| `POST /pull` | `{"clientId", "since", "limit"}` | `{"version", "lastSeq", "records", "more"}` |
 | `GET /healthz` | | `{"status": "ok"}` |
 
 An op is `{"kind": "put" | "delete", "collection", "id", "fields"}`.

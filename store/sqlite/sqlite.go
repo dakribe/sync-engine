@@ -207,10 +207,14 @@ func (t *tx) PutRecord(rec wire.Record) error {
 	return err
 }
 
-func (t *tx) ChangedSince(v uint64) ([]wire.Record, error) {
+func (t *tx) Changes(after, through uint64, limit int) ([]wire.Record, error) {
+	if limit <= 0 {
+		limit = -1 // no limit
+	}
 	rows, err := t.tx.QueryContext(t.ctx,
 		`SELECT collection, id, fields, deleted, version FROM records
-		 WHERE version > ? ORDER BY version, collection, id`, v)
+		 WHERE version > ? AND version <= ? ORDER BY version, collection, id LIMIT ?`,
+		after, through, limit)
 	if err != nil {
 		return nil, err
 	}

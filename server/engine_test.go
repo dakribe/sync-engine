@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -45,6 +46,9 @@ var engineTests = []struct {
 	{"PulledRecordsAreCopies", testPulledRecordsAreCopies},
 	{"RequestsNeedClientID", testRequestsNeedClientID},
 	{"ConcurrentPushes", testConcurrentPushes},
+	{"PullPagesNeverSplitAMutation", testPullPagesNeverSplitAMutation},
+	{"PullSendsAMutationBiggerThanAPageWhole", testPullSendsAMutationBiggerThanAPageWhole},
+	{"PullPagesByRecord", testPullPagesByRecord},
 }
 
 func TestEngine(t *testing.T) {
@@ -284,5 +288,85 @@ func testConcurrentPushes(t *testing.T, e *Engine) {
 	got := pull(t, e, "reader", 0)
 	if got.Version != clients*perClient || len(got.Records) != clients {
 		t.Fatalf("version %d with %d records, want %d and %d", got.Version, len(got.Records), clients*perClient, clients)
+	}
+}
+
+// pullAll follows pages until More is false and returns every page.
+func pullAll(t *testing.T, e *Engine, since uint64, limit int) []wire.PullResponse {
+	t.Helper()
+	var pages []wire.PullResponse
+	for {
+		resp, err := e.Pull(t.Context(), wire.PullRequest{ClientID: "reader", Since: since, Limit: limit})
+		if err != nil {
+			t.Fatalf("pull: %v", err)
+		}
+		pages = append(pages, resp)
+		if !resp.More {
+			return pages
+		}
+		if resp.Version <= since {
+			t.Fatalf("pull from %d made no progress", since)
+		}
+		since = resp.Version
+	}
+}
+
+func testPullPagesNeverSplitAMutation(t *testing.T, e *Engine) {
+	// 10 mutations of 3 records each.
+	for seq := uint64(1); seq <= 10; seq++ {
+		var ops []wire.Op
+		for i := range 3 {
+			ops = append(ops, put("t", fmt.Sprintf("%d-%d", seq, i), map[string]any{"n": i}))
+		}
+		push(t, e, "a", wire.Mutation{Seq: seq, Ops: ops})
+	}
+
+	pages := pullAll(t, e, 0, 4)
+	seen := map[string]bool{}
+	for i, page := range pages {
+		if len(page.Records)%3 != 0 {
+			t.Fatalf("page %d has %d records, which splits a mutation", i, len(page.Records))
+		}
+		for _, rec := range page.Records {
+			if rec.Version > page.Version {
+				t.Fatalf("page %d holds version %d past its cursor %d", i, rec.Version, page.Version)
+			}
+			seen[rec.ID] = true
+		}
+	}
+	if len(seen) != 30 || len(pages) != 10 {
+		t.Fatalf("%d pages with %d records, want 10 pages and 30 records", len(pages), len(seen))
+	}
+	if last := pages[len(pages)-1]; last.Version != 10 || last.More {
+		t.Fatalf("last page = version %d, more %v", last.Version, last.More)
+	}
+}
+
+func testPullSendsAMutationBiggerThanAPageWhole(t *testing.T, e *Engine) {
+	var ops []wire.Op
+	for i := range 5 {
+		ops = append(ops, put("t", fmt.Sprint(i), map[string]any{"n": i}))
+	}
+	push(t, e, "a",
+		wire.Mutation{Seq: 1, Ops: ops},
+		wire.Mutation{Seq: 2, Ops: []wire.Op{put("t", "after", map[string]any{"n": 1})}},
+	)
+
+	pages := pullAll(t, e, 0, 2)
+	if len(pages) != 2 || len(pages[0].Records) != 5 || pages[0].Version != 1 || len(pages[1].Records) != 1 {
+		t.Fatalf("pages = %+v, want the 5-record mutation whole, then the last record", pages)
+	}
+}
+
+func testPullPagesByRecord(t *testing.T, e *Engine) {
+	for seq := uint64(1); seq <= 25; seq++ {
+		push(t, e, "a", wire.Mutation{Seq: seq, Ops: []wire.Op{put("t", fmt.Sprint(seq), map[string]any{"n": seq})}})
+	}
+	pages := pullAll(t, e, 0, 10)
+	if len(pages) != 3 || len(pages[0].Records) != 10 || len(pages[2].Records) != 5 {
+		t.Fatalf("got %d pages, want 10, 10 and 5 records", len(pages))
+	}
+	if !pages[0].More || pages[0].Version != 10 {
+		t.Fatalf("first page = version %d, more %v; want 10, true", pages[0].Version, pages[0].More)
 	}
 }

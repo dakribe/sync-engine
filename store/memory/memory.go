@@ -121,15 +121,16 @@ func (t *tx) PutRecord(rec wire.Record) error {
 	return nil
 }
 
-func (t *tx) ChangedSince(v uint64) ([]wire.Record, error) {
+func (t *tx) Changes(after, through uint64, limit int) ([]wire.Record, error) {
+	in := func(v uint64) bool { return v > after && v <= through }
 	out := []wire.Record{}
 	for k, rec := range t.s.records {
-		if _, staged := t.records[k]; !staged && rec.Version > v {
+		if _, staged := t.records[k]; !staged && in(rec.Version) {
 			out = append(out, clone(rec))
 		}
 	}
 	for _, rec := range t.records {
-		if rec.Version > v {
+		if in(rec.Version) {
 			out = append(out, clone(rec))
 		}
 	}
@@ -140,6 +141,9 @@ func (t *tx) ChangedSince(v uint64) ([]wire.Record, error) {
 			cmp.Compare(a.ID, b.ID),
 		)
 	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 

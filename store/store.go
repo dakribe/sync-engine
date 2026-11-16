@@ -30,7 +30,7 @@ type Tx interface {
 	Record(collection, id string) (wire.Record, bool, error)
 	PutRecord(rec wire.Record) error
 
-	// ChangedSince returns every record with a version above v, ordered by version, then
-	// collection, then id.
-	ChangedSince(v uint64) ([]wire.Record, error)
+	// Changes returns records with after < version <= through, ordered by version, then
+	// collection, then id. If limit > 0, it returns at most limit records.
+	Changes(after, through uint64, limit int) ([]wire.Record, error)
 }
