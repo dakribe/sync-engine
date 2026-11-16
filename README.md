@@ -22,6 +22,24 @@ so everyone ends up with the same data.
 - **Conflicts.** The server's order decides. A put changes only the fields it names, so two
   clients editing different fields of the same record both keep their change.
 
+## API
+
+JSON over HTTP. Errors are objects with an `"error"` field, and bodies are capped at 8 MB.
+
+| Endpoint | Request | Response |
+|---|---|---|
+| `POST /push` | `{"clientId", "mutations": [{"seq", "ops": [...]}]}` | `{"lastSeq", "rejected"}` |
+| `POST /pull` | `{"clientId", "since"}` | `{"version", "lastSeq", "records"}` |
+| `GET /healthz` | | `{"status": "ok"}` |
+
+An op is `{"kind": "put" | "delete", "collection", "id", "fields"}`.
+
+```sh
+curl -X POST localhost:8080/push -d '{"clientId":"a","mutations":[{"seq":1,"ops":[
+  {"kind":"put","collection":"todos","id":"1","fields":{"title":"milk"}}]}]}'
+curl -X POST localhost:8080/pull -d '{"clientId":"b","since":0}'
+```
+
 ## Storage
 
 The engine runs on a small `Store` interface with two implementations, and every engine
@@ -50,7 +68,7 @@ cmd/syncd/      The server program
 
 - [x] Server engine: ordered, idempotent push and compacted pull
 - [x] SQLite storage
-- [ ] HTTP API
+- [x] HTTP API
 - [ ] Client with offline queue, optimistic writes and rebase
 - [ ] Live updates over WebSocket
 - [ ] Simulation tests with many clients over an unreliable network
@@ -63,5 +81,6 @@ Requires Go 1.26.
 
 ```sh
 go test ./...
-go run ./cmd/syncd
+go run ./cmd/syncd                  # listens on :8080, data in sync.db
+go run ./cmd/syncd -db ""           # keep data in memory
 ```
