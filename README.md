@@ -110,6 +110,34 @@ test runs against both:
   numbered migrations.
 - **Memory** (`store/memory`), for tests and running without a database.
 
+## Testing
+
+Besides unit tests for each package, `sim/` tests the whole system:
+
+- **Deterministic simulation.** Four clients, two of them saved to disk, make random edits
+  while a seeded random network drops requests, loses responses after the server applied
+  them, delivers requests twice and replays stale pushes late. Clients go offline and
+  restart. The server is wrapped in a recorder that replays every mutation it applies onto
+  a reference model, keeping the state at every version. **After every step**, each
+  client's view must equal the model at the client's cursor with its own pending
+  mutations replayed on top. At the end the network heals, and every client, the server
+  and the model must hold the same data, with every mutation applied exactly once and in
+  order. A failing seed reproduces exactly with `-seed N`.
+- **Concurrent clients.** Six clients in real goroutines write as fast as they can while
+  their background loops sync over a network that fails a quarter of requests. After it
+  heals, they must converge on their own through live updates. Run with `-race`.
+
+The simulation found a bug on its first run: a pull interrupted between pages left a
+client showing half of a mutation. It's fixed (the client now applies a pull's pages
+together), with a unit test that reproduces it.
+
+```sh
+go test ./...                                   # 100 seeds × 400 steps, plus SQLite seeds
+go test ./sim -run 'TestSimulation$' -seeds 2000  # longer sweep (about 3 minutes)
+go test ./sim -run 'TestSimulation$' -seed 42 -v  # replay one seed
+go test -race ./...
+```
+
 ## Layout
 
 ```
@@ -120,6 +148,7 @@ store/          The storage interface
 store/sqlite/   SQLite storage
 store/memory/   In-memory storage
 internal/       Shared SQLite setup and migrations
+sim/            Whole-system simulation tests
 cmd/syncd/      The server program
 ```
 
@@ -130,7 +159,7 @@ cmd/syncd/      The server program
 - [x] HTTP API
 - [x] Client with offline queue, optimistic writes and rebase
 - [x] Live updates over server-sent events
-- [ ] Simulation tests with many clients over an unreliable network
+- [x] Simulation tests with many clients over an unreliable network
 - [ ] Benchmarks
 - [ ] Demo app
 
