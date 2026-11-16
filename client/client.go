@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/dakribe/sync-engine/wire"
 )
@@ -42,6 +43,15 @@ type Options struct {
 	// OnReject is called when the server rejects a mutation. The mutation's effect is
 	// removed from local data at the next pull.
 	OnReject func(wire.Rejection)
+
+	// PollInterval is how often Run syncs when nothing else prompts it. 0 means
+	// DefaultPollInterval.
+	PollInterval time.Duration
+	// MinBackoff and MaxBackoff bound how long Run waits after failed syncs. 0 means
+	// DefaultMinBackoff and DefaultMaxBackoff.
+	MinBackoff, MaxBackoff time.Duration
+	// OnSyncError is called when a sync in Run fails, for example while offline.
+	OnSyncError func(error)
 }
 
 // Client is a local replica. Its methods are safe to call from many goroutines.
@@ -59,6 +69,8 @@ type Client struct {
 	nextSeq uint64
 	cursor  uint64
 	subs    map[chan struct{}]struct{}
+
+	wake chan struct{} // asks Run to sync
 }
 
 // New returns an empty client that syncs through t.
@@ -69,6 +81,15 @@ func New(t Transport, opts Options) *Client {
 	if opts.PushBatch <= 0 {
 		opts.PushBatch = 100
 	}
+	if opts.PollInterval <= 0 {
+		opts.PollInterval = DefaultPollInterval
+	}
+	if opts.MinBackoff <= 0 {
+		opts.MinBackoff = DefaultMinBackoff
+	}
+	if opts.MaxBackoff <= 0 {
+		opts.MaxBackoff = DefaultMaxBackoff
+	}
 	c := &Client{
 		id:        opts.ID,
 		transport: t,
@@ -76,6 +97,7 @@ func New(t Transport, opts Options) *Client {
 		base:      newTable(),
 		nextSeq:   1,
 		subs:      map[chan struct{}]struct{}{},
+		wake:      make(chan struct{}, 1),
 	}
 	c.view = newLayer(c.base)
 	return c
@@ -100,6 +122,7 @@ func (c *Client) Mutate(ops ...wire.Op) error {
 	c.nextSeq++
 	c.pending = append(c.pending, m)
 	c.notify()
+	c.Poke()
 	return nil
 }
 

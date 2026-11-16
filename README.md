@@ -34,6 +34,7 @@ c.Put("todos", "1", map[string]any{"title": "milk", "done": false}) // visible a
 c.Get("todos", "1")
 c.List("todos")
 c.Sync(ctx) // push, pull, rebase; safe to call offline
+go c.Run(ctx) // or let it sync in the background
 ```
 
 - **Two layers.** The client holds the server's data as of its last pull (the base) and,
@@ -46,6 +47,11 @@ c.Sync(ctx) // push, pull, rebase; safe to call offline
   mutations touch are copied, so a rebase costs the same over 10 records or 10 million.
 - **No flicker.** Pushed mutations stay in the queue until a pull brings back data that
   includes them, so a change never blinks out between push and pull.
+- **Background sync.** `Run` syncs right after a local change, when poked, and on an
+  interval. Writes made during a sync are folded into one more, so a burst of edits costs a
+  couple of round trips. While offline it backs off exponentially with jitter (250 ms up to
+  30 s), and doesn't retry on every keystroke. Its tests run on a fake clock
+  (`testing/synctest`), so they're instant and deterministic.
 - **Offline is the normal case.** A failed push or pull loses nothing; the next sync
   continues. A push whose reply was lost is resent and applied once.
 
