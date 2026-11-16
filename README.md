@@ -7,6 +7,28 @@ offline. Changes are queued and pushed to a server, which puts every client's ch
 order and sends the result back out. Clients then replay their own unconfirmed changes on top,
 so everyone ends up with the same data.
 
+## Try it
+
+A terminal to-do list built on the client (`cmd/todo`). Start a server, then open two
+terminals:
+
+```sh
+go run ./cmd/syncd -db ""                 # terminal 1
+go run ./cmd/todo -db alice.db            # terminal 2
+go run ./cmd/todo -db bob.db              # terminal 3
+```
+
+Commands: `add <title>`, `done <n>`, `rename <n> <title>`, `rm <n>`, `offline`, `online`.
+Add a to-do in one terminal and it shows in the other right away. Type `offline` in one,
+make changes (they show at once, marked as not yet synced), then `online` and watch them
+appear in the other. Quit and restart while offline and the changes are still there.
+
+```
+  1. [x] buy milk
+  2. [ ] call mom and dad
+  -- offline, 2 change(s) not yet synced --
+```
+
 ## Performance
 
 Measured on an Apple M1 Pro (10 cores), with clients and server on the same machine, the
@@ -200,6 +222,7 @@ internal/       Shared SQLite setup and migrations
 sim/            Whole-system simulation tests
 cmd/syncd/      The server program
 cmd/syncbench/  End-to-end benchmark over HTTP
+cmd/todo/       Demo: a terminal to-do list
 ```
 
 ## Roadmap
@@ -211,7 +234,7 @@ cmd/syncbench/  End-to-end benchmark over HTTP
 - [x] Live updates over server-sent events
 - [x] Simulation tests with many clients over an unreliable network
 - [x] Benchmarks
-- [ ] Demo app
+- [x] Demo app
 
 ## Build and test
 
