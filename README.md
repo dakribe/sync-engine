@@ -25,6 +25,30 @@ so everyone ends up with the same data.
 - **Conflicts.** The server's order decides. A put changes only the fields it names, so two
   clients editing different fields of the same record both keep their change.
 
+## Client
+
+```go
+c := client.New(&client.HTTPTransport{BaseURL: "http://localhost:8080"}, client.Options{})
+
+c.Put("todos", "1", map[string]any{"title": "milk", "done": false}) // visible at once
+c.Get("todos", "1")
+c.List("todos")
+c.Sync(ctx) // push, pull, rebase; safe to call offline
+```
+
+- **Two layers.** The client holds the server's data as of its last pull (the base) and,
+  on top, a copy-on-write layer with its unconfirmed mutations applied. Reads go through
+  the layer, so a change is visible the moment it's made.
+- **Same rules on both sides.** Client and server apply mutations with the same function,
+  `wire.Apply`, so the client's prediction matches what the server will do.
+- **Rebase costs what's pending, not what's stored.** After a pull, the client throws away
+  the layer and replays its pending mutations on a fresh one. Only records those
+  mutations touch are copied, so a rebase costs the same over 10 records or 10 million.
+- **No flicker.** Pushed mutations stay in the queue until a pull brings back data that
+  includes them, so a change never blinks out between push and pull.
+- **Offline is the normal case.** A failed push or pull loses nothing; the next sync
+  continues. A push whose reply was lost is resent and applied once.
+
 ## API
 
 JSON over HTTP. Errors are objects with an `"error"` field, and bodies are capped at 8 MB.
@@ -59,7 +83,8 @@ test runs against both:
 ## Layout
 
 ```
-wire/           Messages between clients and the server
+wire/           Messages between clients and the server, and the rules for applying them
+client/         The local replica: optimistic writes, sync, rebase
 server/         The engine: push and pull
 store/          The storage interface
 store/sqlite/   SQLite storage
@@ -72,7 +97,7 @@ cmd/syncd/      The server program
 - [x] Server engine: ordered, idempotent push and compacted pull
 - [x] SQLite storage
 - [x] HTTP API
-- [ ] Client with offline queue, optimistic writes and rebase
+- [x] Client with offline queue, optimistic writes and rebase
 - [ ] Live updates over WebSocket
 - [ ] Simulation tests with many clients over an unreliable network
 - [ ] Benchmarks

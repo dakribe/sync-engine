@@ -4,7 +4,6 @@ package server
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"slices"
 
@@ -61,7 +60,7 @@ func (e *Engine) Push(ctx context.Context, req wire.PushRequest) (wire.PushRespo
 				resp.Rejected = append(resp.Rejected, wire.Rejection{Seq: m.Seq, Reason: err.Error()})
 			} else {
 				version++
-				if err := apply(tx, version, m); err != nil {
+				if err := wire.Apply(tx, version, m); err != nil {
 					return err
 				}
 			}
@@ -81,37 +80,6 @@ func (e *Engine) Push(ctx context.Context, req wire.PushRequest) (wire.PushRespo
 		return wire.PushResponse{}, err
 	}
 	return resp, nil
-}
-
-// apply runs a valid mutation's ops under the given version.
-func apply(tx store.Tx, version uint64, m wire.Mutation) error {
-	for _, op := range m.Ops {
-		rec, ok, err := tx.Record(op.Collection, op.ID)
-		if err != nil {
-			return err
-		}
-		switch op.Kind {
-		case wire.OpPut:
-			if !ok || rec.Deleted {
-				// A put on a missing or deleted record starts it fresh.
-				rec = wire.Record{Collection: op.Collection, ID: op.ID, Fields: map[string]json.RawMessage{}}
-			}
-			for name, value := range op.Fields {
-				rec.Fields[name] = value
-			}
-		case wire.OpDelete:
-			if !ok || rec.Deleted {
-				continue
-			}
-			rec.Deleted = true
-			rec.Fields = nil
-		}
-		rec.Version = version
-		if err := tx.PutRecord(rec); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Page sizes for Pull.

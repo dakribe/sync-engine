@@ -5,7 +5,6 @@ package memory
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"slices"
 	"sync"
@@ -110,14 +109,14 @@ func (t *tx) Record(collection, id string) (wire.Record, bool, error) {
 	if !ok {
 		return wire.Record{}, false, nil
 	}
-	return clone(rec), true, nil
+	return rec.Clone(), true, nil
 }
 
 func (t *tx) PutRecord(rec wire.Record) error {
 	if !t.writable {
 		return errReadOnly
 	}
-	t.records[key{rec.Collection, rec.ID}] = clone(rec)
+	t.records[key{rec.Collection, rec.ID}] = rec.Clone()
 	return nil
 }
 
@@ -126,12 +125,12 @@ func (t *tx) Changes(after, through uint64, limit int) ([]wire.Record, error) {
 	out := []wire.Record{}
 	for k, rec := range t.s.records {
 		if _, staged := t.records[k]; !staged && in(rec.Version) {
-			out = append(out, clone(rec))
+			out = append(out, rec.Clone())
 		}
 	}
 	for _, rec := range t.records {
 		if in(rec.Version) {
-			out = append(out, clone(rec))
+			out = append(out, rec.Clone())
 		}
 	}
 	slices.SortFunc(out, func(a, b wire.Record) int {
@@ -148,14 +147,3 @@ func (t *tx) Changes(after, through uint64, limit int) ([]wire.Record, error) {
 }
 
 var errReadOnly = errors.New("memory: write in a read-only transaction")
-
-func clone(rec wire.Record) wire.Record {
-	if rec.Fields != nil {
-		fields := make(map[string]json.RawMessage, len(rec.Fields))
-		for name, value := range rec.Fields {
-			fields[name] = slices.Clone(value)
-		}
-		rec.Fields = fields
-	}
-	return rec
-}

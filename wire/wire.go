@@ -119,3 +119,15 @@ func (m Mutation) Validate() error {
 	}
 	return nil
 }
+
+// Clone returns a deep copy of the record.
+func (r Record) Clone() Record {
+	if r.Fields != nil {
+		fields := make(map[string]json.RawMessage, len(r.Fields))
+		for name, value := range r.Fields {
+			fields[name] = append(json.RawMessage(nil), value...)
+		}
+		r.Fields = fields
+	}
+	return r
+}
