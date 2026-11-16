@@ -70,7 +70,8 @@ type Client struct {
 	cursor  uint64
 	subs    map[chan struct{}]struct{}
 
-	wake chan struct{} // asks Run to sync
+	wake chan struct{} // a local change asks Run to sync
+	poke chan struct{} // the server asks Run to sync
 	disk *disk         // nil for a client that lives only in memory
 }
 
@@ -99,6 +100,7 @@ func New(t Transport, opts Options) *Client {
 		nextSeq:   1,
 		subs:      map[chan struct{}]struct{}{},
 		wake:      make(chan struct{}, 1),
+		poke:      make(chan struct{}, 1),
 	}
 	c.view = newLayer(c.base)
 	return c
@@ -175,7 +177,7 @@ func (c *Client) Mutate(ops ...wire.Op) error {
 	c.nextSeq++
 	c.pending = append(c.pending, m)
 	c.notify()
-	c.Poke()
+	signal(c.wake)
 	return nil
 }
 

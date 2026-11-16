@@ -32,7 +32,8 @@ func TestRunSyncsAfterLocalChange(t *testing.T) {
 func TestRunPollsForRemoteChanges(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		e := newEngine()
-		a, b := New(e, Options{PollInterval: time.Minute}), New(e, Options{})
+		// flaky hides the engine's Watch, so a has no live updates and must poll.
+		a, b := New(&flaky{Transport: e}, Options{PollInterval: time.Minute}), New(e, Options{})
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		go a.Run(ctx)
@@ -113,4 +114,52 @@ func TestBackoffGrowsAndCaps(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRunPullsAsSoonAsServerAnnouncesAChange(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newEngine()
+		a, b := New(e, Options{PollInterval: time.Hour}), New(e, Options{})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go a.Run(ctx)
+		synctest.Wait()
+
+		mustPut(t, b, "t", "1", map[string]any{"x": 1})
+		mustSync(t, b)
+		synctest.Wait() // no time passes: only the announcement can wake a
+		if _, ok := a.Get("t", "1"); !ok {
+			t.Fatal("a didn't pull after the server announced a change")
+		}
+	})
+}
+
+func TestWatchCatchesUpAfterReconnecting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newEngine()
+		a := New(e, Options{PollInterval: time.Hour, MinBackoff: time.Second})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go a.Run(ctx)
+		synctest.Wait()
+
+		// Closing the engine drops a's connection, like a server restart. b's change
+		// lands while a is disconnected, so no announcement reaches a.
+		e.Close()
+		synctest.Wait()
+		b := New(e, Options{})
+		mustPut(t, b, "t", "1", map[string]any{"x": 1})
+		mustSync(t, b)
+		synctest.Wait()
+		if _, ok := a.Get("t", "1"); ok {
+			t.Fatal("a learned of the change while disconnected")
+		}
+
+		// On reconnecting, the first thing a hears is the current version, so it catches up.
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if _, ok := a.Get("t", "1"); !ok {
+			t.Fatal("a didn't catch up after reconnecting")
+		}
+	})
 }

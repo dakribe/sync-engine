@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -76,4 +77,55 @@ func (t *HTTPTransport) post(ctx context.Context, path string, in, out any) erro
 		return &StatusError{Code: resp.StatusCode, Message: e.Error}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// Watch reads the server's event stream, calling fn with each version it announces, until
+// ctx is done or the stream breaks.
+func (t *HTTPTransport) Watch(ctx context.Context, fn func(version uint64)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(t.BaseURL, "/")+"/events", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	hc := t.Client
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return &StatusError{Code: resp.StatusCode, Message: "event stream refused"}
+	}
+
+	// Events are blocks of "field: value" lines ended by a blank line. Only poke events
+	// matter here, and their data is {"version":N}.
+	var event, data string
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case line == "":
+			if event == "poke" {
+				var p struct {
+					Version uint64 `json:"version"`
+				}
+				if err := json.Unmarshal([]byte(data), &p); err != nil {
+					return fmt.Errorf("bad poke %q: %w", data, err)
+				}
+				fn(p.Version)
+			}
+			event, data = "", ""
+		case strings.HasPrefix(line, "event:"):
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data += strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	return io.ErrUnexpectedEOF
 }

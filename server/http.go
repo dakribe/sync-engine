@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/dakribe/sync-engine/wire"
 )
@@ -17,6 +19,7 @@ const MaxBodyBytes = 8 << 20
 //
 //	POST /push   wire.PushRequest  -> wire.PushResponse
 //	POST /pull   wire.PullRequest  -> wire.PullResponse
+//	GET  /events  a stream of server-sent events, see events
 //	GET  /healthz
 //
 // Errors are JSON objects with an "error" field.
@@ -25,6 +28,7 @@ func NewHandler(e *Engine, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /push", h.push)
 	mux.HandleFunc("POST /pull", h.pull)
+	mux.HandleFunc("GET /events", h.events)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -60,6 +64,63 @@ func (h *handler) pull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// HeartbeatInterval is how often an idle event stream sends a comment, so proxies and
+// clients can tell a quiet connection from a dead one.
+var HeartbeatInterval = 15 * time.Second
+
+// events streams a "poke" event with the current version as soon as a client connects,
+// then another each time data changes:
+//
+//	event: poke
+//	data: {"version":42}
+//
+// A poke says only that there's something new; the client pulls to get it. Pokes are
+// small, and a client that's behind skips straight to the latest one.
+func (h *handler) events(w http.ResponseWriter, r *http.Request) {
+	ch, stop := h.engine.Subscribe()
+	defer stop()
+
+	version, err := h.engine.Version(r.Context())
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	rc.SetWriteDeadline(time.Time{}) // the stream outlives the server's write timeout
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // stop nginx from buffering the stream
+	w.WriteHeader(http.StatusOK)
+
+	send := func(format string, args ...any) bool {
+		if _, err := fmt.Fprintf(w, format, args...); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+	if !send("event: poke\ndata: {\"version\":%d}\n\n", version) {
+		return
+	}
+
+	heartbeat := time.NewTicker(HeartbeatInterval)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case v, ok := <-ch:
+			if !ok || !send("event: poke\ndata: {\"version\":%d}\n\n", v) {
+				return
+			}
+		case <-heartbeat.C:
+			if !send(": ping\n\n") {
+				return
+			}
+		}
+	}
 }
 
 func (h *handler) decode(w http.ResponseWriter, r *http.Request, v any) bool {

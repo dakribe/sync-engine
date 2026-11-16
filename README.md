@@ -20,6 +20,9 @@ so everyone ends up with the same data.
 - **Pages.** Large pulls come in pages of up to 1,000 records (the client can ask for up to
   10,000). A page never splits a mutation, so after every page the client holds a state the
   server actually passed through. The client keeps pulling while `more` is set.
+- **Live updates.** Clients keep an event stream open. When a push changes data, the
+  server sends each client a tiny poke with the new version, and clients that are behind
+  pull. A slow client skips straight to the latest version instead of queueing pokes.
 - **Rebase.** The client drops the mutations the server confirmed and replays the rest on top
   of the server's data.
 - **Conflicts.** The server's order decides. A put changes only the fields it names, so two
@@ -57,6 +60,11 @@ go c.Run(ctx) // or let it sync in the background
   whenever the app next runs, and a restarted client never reuses a mutation number (the
   server would skip it as a duplicate). Each change is written to disk before it's applied
   in memory, and reads are served from memory.
+- **Live.** `Run` holds the event stream open and pulls the moment the server announces
+  a version newer than its own, reconnecting with backoff if the stream drops. In the
+  end-to-end test, a write on one client shows on another over local HTTP in about 2 ms,
+  with polling switched off. While offline, local writes don't trigger retries but a poke
+  does, since it means the server is back.
 - **Offline is the normal case.** A failed push or pull loses nothing; the next sync
   continues. A push whose reply was lost is resent and applied once.
 
@@ -68,9 +76,18 @@ JSON over HTTP. Errors are objects with an `"error"` field, and bodies are cappe
 |---|---|---|
 | `POST /push` | `{"clientId", "mutations": [{"seq", "ops": [...]}]}` | `{"lastSeq", "rejected"}` |
 | `POST /pull` | `{"clientId", "since", "limit"}` | `{"version", "lastSeq", "records", "more"}` |
+| `GET /events` | | server-sent events: `event: poke`, `data: {"version"}` |
 | `GET /healthz` | | `{"status": "ok"}` |
 
 An op is `{"kind": "put" | "delete", "collection", "id", "fields"}`.
+
+`/events` sends the current version as soon as you connect, so a client that reconnects
+after a drop catches up at once, then a poke after each change, and a comment every 15 s
+so proxies don't close an idle stream.
+
+**Why server-sent events and not WebSocket?** Pokes only go from server to client; writes
+already go over plain HTTP. SSE does this with the standard library, passes through
+ordinary HTTP proxies, and needs no extra protocol or dependency.
 
 ```sh
 curl -X POST localhost:8080/push -d '{"clientId":"a","mutations":[{"seq":1,"ops":[
@@ -110,7 +127,7 @@ cmd/syncd/      The server program
 - [x] SQLite storage
 - [x] HTTP API
 - [x] Client with offline queue, optimistic writes and rebase
-- [ ] Live updates over WebSocket
+- [x] Live updates over server-sent events
 - [ ] Simulation tests with many clients over an unreliable network
 - [ ] Benchmarks
 - [ ] Demo app

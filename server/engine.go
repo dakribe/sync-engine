@@ -19,11 +19,12 @@ var ErrNoClientID = errors.New("request has no client id")
 // to find records newer than the client's cursor.
 type Engine struct {
 	store store.Store
+	watch *broadcaster
 }
 
 // NewEngine returns an engine that keeps its data in s.
 func NewEngine(s store.Store) *Engine {
-	return &Engine{store: s}
+	return &Engine{store: s, watch: newBroadcaster()}
 }
 
 // Push applies a client's mutations in order, in one transaction. Mutations the server
@@ -36,9 +37,12 @@ func (e *Engine) Push(ctx context.Context, req wire.PushRequest) (wire.PushRespo
 		return wire.PushResponse{}, ErrNoClientID
 	}
 
-	var resp wire.PushResponse
+	var (
+		resp       wire.PushResponse
+		newVersion uint64 // set if this push changed data
+	)
 	err := e.store.Update(ctx, func(tx store.Tx) error {
-		resp = wire.PushResponse{}
+		resp, newVersion = wire.PushResponse{}, 0
 		last, err := tx.LastSeq(req.ClientID)
 		if err != nil {
 			return err
@@ -48,7 +52,7 @@ func (e *Engine) Push(ctx context.Context, req wire.PushRequest) (wire.PushRespo
 			return err
 		}
 
-		start := last
+		start, startVersion := last, version
 		for _, m := range req.Mutations {
 			if m.Seq <= last {
 				continue // already applied
@@ -74,10 +78,16 @@ func (e *Engine) Push(ctx context.Context, req wire.PushRequest) (wire.PushRespo
 		if err := tx.SetVersion(version); err != nil {
 			return err
 		}
+		if version != startVersion {
+			newVersion = version
+		}
 		return tx.SetLastSeq(req.ClientID, last)
 	})
 	if err != nil {
 		return wire.PushResponse{}, err
+	}
+	if newVersion != 0 {
+		e.watch.publish(newVersion)
 	}
 	return resp, nil
 }

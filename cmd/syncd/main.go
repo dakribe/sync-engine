@@ -43,11 +43,14 @@ func run(addr, dbPath string, logger *slog.Logger) error {
 	}
 	defer st.Close()
 
+	engine := server.NewEngine(st)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewHandler(server.NewEngine(st), logger),
+		Handler:           server.NewHandler(engine, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// Shutdown waits for open requests, and event streams never end on their own.
+	srv.RegisterOnShutdown(engine.Close)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
