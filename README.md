@@ -18,8 +18,10 @@ so everyone ends up with the same data.
   answers with the current state of each changed record, not every step that led there, plus
   the last mutation it applied for that client.
 - **Pages.** Large pulls come in pages of up to 1,000 records (the client can ask for up to
-  10,000). A page never splits a mutation, so after every page the client holds a state the
-  server actually passed through. The client keeps pulling while `more` is set.
+  10,000). A page never splits a mutation, so each page ends at an exact cursor. The client
+  keeps pulling while `more` is set, then applies all the pages at once: a record that
+  changes again mid-pull moves to a later page, so stopping early could show half of a
+  mutation. (The simulation tests found this.)
 - **Live updates.** Clients keep an event stream open. When a push changes data, the
   server sends each client a tiny poke with the new version, and clients that are behind
   pull. A slow client skips straight to the latest version instead of queueing pokes.

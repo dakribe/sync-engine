@@ -104,8 +104,9 @@ const (
 //
 // Large results come in pages. A page never splits a mutation: it ends just before the
 // mutation that would cross the limit, or, if a single mutation is bigger than a page,
-// holds all of that mutation. So every page leaves the client with a state the server
-// actually passed through.
+// holds all of that mutation. So the version a page ends at is an exact cursor: every
+// change up to it has been sent. Clients must apply a pull's pages together, though: a
+// record that changes again while a client is paging moves to a later page.
 func (e *Engine) Pull(ctx context.Context, req wire.PullRequest) (wire.PullResponse, error) {
 	if req.ClientID == "" {
 		return wire.PullResponse{}, ErrNoClientID

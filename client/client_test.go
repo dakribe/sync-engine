@@ -331,3 +331,41 @@ func TestOverHTTP(t *testing.T) {
 		t.Fatalf("pull with no client id: err = %v, want a 400 StatusError", err)
 	}
 }
+
+// failSecondPull fails every pull after the first, so a multi-page pull stops halfway.
+type failSecondPull struct {
+	Transport
+	pulls int
+}
+
+func (f *failSecondPull) Pull(ctx context.Context, req wire.PullRequest) (wire.PullResponse, error) {
+	f.pulls++
+	if f.pulls > 1 {
+		return wire.PullResponse{}, errOffline
+	}
+	return f.Transport.Pull(ctx, req)
+}
+
+func TestInterruptedPullAppliesNothing(t *testing.T) {
+	e := newEngine()
+	writer := New(e, Options{})
+	// Version 1 creates two records together; version 2 changes one of them again, so it
+	// moves to the second page.
+	if err := writer.Mutate(
+		wire.Op{Kind: wire.OpPut, Collection: "t", ID: "a", Fields: map[string]json.RawMessage{"v": json.RawMessage("1")}},
+		wire.Op{Kind: wire.OpPut, Collection: "t", ID: "b", Fields: map[string]json.RawMessage{"v": json.RawMessage("1")}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, writer, "t", "b", map[string]any{"v": 2})
+	mustSync(t, writer)
+
+	reader := New(&failSecondPull{Transport: e}, Options{PullLimit: 1})
+	if err := reader.Sync(t.Context()); err == nil {
+		t.Fatal("sync succeeded with the second page failing")
+	}
+	// Keeping the first page would show record a without record b: half of version 1.
+	if n := len(reader.List("t")); n != 0 || reader.Cursor() != 0 {
+		t.Fatalf("after a failed pull: %d records at cursor %d, want none at 0", n, reader.Cursor())
+	}
+}

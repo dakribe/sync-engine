@@ -155,9 +155,9 @@ func (d *disk) addPending(m wire.Mutation) error {
 	})
 }
 
-// applyPage saves a pulled page: the records, the new cursor, and, on the last page, the
-// confirmed mutations to drop (confirmedThrough > 0).
-func (d *disk) applyPage(recs []wire.Record, cursor, confirmedThrough uint64) error {
+// applyPull saves a finished pull in one transaction: the records, the new cursor, and
+// the confirmed mutations to drop.
+func (d *disk) applyPull(recs []wire.Record, cursor, confirmedThrough uint64) error {
 	return d.inTx(func(tx *sql.Tx) error {
 		for _, rec := range recs {
 			var err error
@@ -177,10 +177,8 @@ func (d *disk) applyPage(recs []wire.Record, cursor, confirmedThrough uint64) er
 				return err
 			}
 		}
-		if confirmedThrough > 0 {
-			if _, err := tx.Exec(`DELETE FROM pending WHERE seq <= ?`, confirmedThrough); err != nil {
-				return err
-			}
+		if _, err := tx.Exec(`DELETE FROM pending WHERE seq <= ?`, confirmedThrough); err != nil {
+			return err
 		}
 		return setMeta(tx, "cursor", cursor)
 	})

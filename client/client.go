@@ -305,55 +305,61 @@ func (c *Client) push(ctx context.Context) error {
 	}
 }
 
-// pull fetches pages until the server says there's no more, applying each one.
+// pull fetches pages until the server says there's no more, then applies them together.
+//
+// Pages can't be applied one at a time. Each page holds the latest state of the records
+// it covers, so a record that changed again while the client was paging arrives in a
+// later page, and stopping after an early page would leave a mix of old and new states
+// that the server never had: half of one mutation, for example. Applying everything at
+// once moves the client from one real server state to another. If a page fails, the pages
+// before it are thrown away and the next pull starts over from the same cursor.
 func (c *Client) pull(ctx context.Context) error {
-	for {
-		c.mu.Lock()
-		since := c.cursor
-		c.mu.Unlock()
+	c.mu.Lock()
+	since := c.cursor
+	c.mu.Unlock()
 
+	var recs []wire.Record
+	for {
 		resp, err := c.transport.Pull(ctx, wire.PullRequest{ClientID: c.id, Since: since, Limit: c.opts.PullLimit})
 		if err != nil {
 			return err
 		}
-		if err := c.apply(resp); err != nil {
-			return err
+		recs = append(recs, resp.Records...)
+		if resp.More && resp.Version <= since {
+			return fmt.Errorf("server returned a page that doesn't move past version %d", since)
 		}
+		since = resp.Version
 		if !resp.More {
-			return nil
+			// LastSeq describes the data only on the last page.
+			return c.apply(recs, resp.Version, resp.LastSeq)
 		}
 	}
 }
 
-// apply moves the base forward by one pulled page and rebases pending mutations onto it.
-func (c *Client) apply(resp wire.PullResponse) error {
+// apply moves the base to the given version, drops the mutations the server confirmed
+// and rebases the rest.
+func (c *Client) apply(recs []wire.Record, version, lastSeq uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.disk != nil {
-		var confirmed uint64
-		if !resp.More {
-			confirmed = resp.LastSeq
-		}
-		if err := c.disk.applyPage(resp.Records, resp.Version, confirmed); err != nil {
+		if err := c.disk.applyPull(recs, version, lastSeq); err != nil {
 			return fmt.Errorf("save pulled data: %w", err)
 		}
 	}
 
-	for _, rec := range resp.Records {
+	// Later pages hold newer states, so applying in order leaves each record's latest.
+	for _, rec := range recs {
 		if rec.Deleted {
 			c.base.delete(rec.Collection, rec.ID)
 		} else {
 			c.base.put(rec)
 		}
 	}
-	c.cursor = resp.Version
-	if !resp.More {
-		// LastSeq describes the data only on the last page.
-		c.pending = slices.DeleteFunc(c.pending, func(m wire.Mutation) bool { return m.Seq <= resp.LastSeq })
-	}
+	c.cursor = version
+	c.pending = slices.DeleteFunc(c.pending, func(m wire.Mutation) bool { return m.Seq <= lastSeq })
 	c.rebase()
-	if len(resp.Records) > 0 {
+	if len(recs) > 0 {
 		c.notify()
 	}
 	return nil
