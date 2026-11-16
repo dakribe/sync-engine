@@ -28,7 +28,7 @@ so everyone ends up with the same data.
 ## Client
 
 ```go
-c := client.New(&client.HTTPTransport{BaseURL: "http://localhost:8080"}, client.Options{})
+c, err := client.Open("todos.db", &client.HTTPTransport{BaseURL: "http://localhost:8080"}, client.Options{})
 
 c.Put("todos", "1", map[string]any{"title": "milk", "done": false}) // visible at once
 c.Get("todos", "1")
@@ -52,6 +52,11 @@ go c.Run(ctx) // or let it sync in the background
   couple of round trips. While offline it backs off exponentially with jitter (250 ms up to
   30 s), and doesn't retry on every keystroke. Its tests run on a fake clock
   (`testing/synctest`), so they're instant and deterministic.
+- **Survives restarts.** `client.Open(path, ...)` keeps the client's state in a SQLite
+  file: its ID, cursor, synced data and pending mutations. A change made offline is pushed
+  whenever the app next runs, and a restarted client never reuses a mutation number (the
+  server would skip it as a duplicate). Each change is written to disk before it's applied
+  in memory, and reads are served from memory.
 - **Offline is the normal case.** A failed push or pull loses nothing; the next sync
   continues. A push whose reply was lost is resent and applied once.
 
@@ -95,6 +100,7 @@ server/         The engine: push and pull
 store/          The storage interface
 store/sqlite/   SQLite storage
 store/memory/   In-memory storage
+internal/       Shared SQLite setup and migrations
 cmd/syncd/      The server program
 ```
 

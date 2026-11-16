@@ -71,6 +71,7 @@ type Client struct {
 	subs    map[chan struct{}]struct{}
 
 	wake chan struct{} // asks Run to sync
+	disk *disk         // nil for a client that lives only in memory
 }
 
 // New returns an empty client that syncs through t.
@@ -103,6 +104,54 @@ func New(t Transport, opts Options) *Client {
 	return c
 }
 
+// Open returns a client whose state lives in the SQLite file at path, creating it if
+// needed. Pending mutations, the synced data and the client's ID survive restarts, so a
+// change made offline is pushed whenever the app next runs. If opts.ID is set it must
+// match the ID saved in the file.
+//
+// Reads are still served from memory: the file is loaded at startup and written before
+// each change is applied in memory.
+func Open(path string, t Transport, opts Options) (*Client, error) {
+	d, err := openDisk(path)
+	if err != nil {
+		return nil, err
+	}
+	st, err := d.load()
+	if err != nil {
+		d.close()
+		return nil, err
+	}
+
+	switch {
+	case st.id == "":
+		c := New(t, opts) // picks a random ID if none was given
+		if err := d.setID(c.id); err != nil {
+			d.close()
+			return nil, err
+		}
+		c.disk = d
+		return c, nil
+	case opts.ID != "" && opts.ID != st.id:
+		d.close()
+		return nil, fmt.Errorf("client: %s belongs to client %q, not %q", path, st.id, opts.ID)
+	}
+
+	opts.ID = st.id
+	c := New(t, opts)
+	c.disk = d
+	c.base, c.cursor, c.nextSeq, c.pending = st.base, st.cursor, st.nextSeq, st.pending
+	c.rebase()
+	return c, nil
+}
+
+// Close closes the client's file, if it has one. Stop Run before calling it.
+func (c *Client) Close() error {
+	if c.disk == nil {
+		return nil
+	}
+	return c.disk.close()
+}
+
 // ID returns the client's ID.
 func (c *Client) ID() string { return c.id }
 
@@ -116,9 +165,13 @@ func (c *Client) Mutate(ops ...wire.Op) error {
 	if err := m.Validate(); err != nil {
 		return err
 	}
-	if err := wire.Apply(c.view, 0, m); err != nil {
-		return err
+	if c.disk != nil {
+		if err := c.disk.addPending(m); err != nil {
+			return fmt.Errorf("save mutation: %w", err)
+		}
 	}
+	// The layer's methods can't fail.
+	_ = wire.Apply(c.view, 0, m)
 	c.nextSeq++
 	c.pending = append(c.pending, m)
 	c.notify()
@@ -261,7 +314,9 @@ func (c *Client) pull(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		c.apply(resp)
+		if err := c.apply(resp); err != nil {
+			return err
+		}
 		if !resp.More {
 			return nil
 		}
@@ -269,9 +324,19 @@ func (c *Client) pull(ctx context.Context) error {
 }
 
 // apply moves the base forward by one pulled page and rebases pending mutations onto it.
-func (c *Client) apply(resp wire.PullResponse) {
+func (c *Client) apply(resp wire.PullResponse) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.disk != nil {
+		var confirmed uint64
+		if !resp.More {
+			confirmed = resp.LastSeq
+		}
+		if err := c.disk.applyPage(resp.Records, resp.Version, confirmed); err != nil {
+			return fmt.Errorf("save pulled data: %w", err)
+		}
+	}
 
 	for _, rec := range resp.Records {
 		if rec.Deleted {
@@ -289,6 +354,7 @@ func (c *Client) apply(resp wire.PullResponse) {
 	if len(resp.Records) > 0 {
 		c.notify()
 	}
+	return nil
 }
 
 // rebase replays pending mutations on a fresh layer over the base. The caller holds c.mu.
