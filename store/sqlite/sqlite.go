@@ -3,8 +3,7 @@
 // It opens the file twice: one connection for writes, so Update transactions run one at a
 // time and never fight over the write lock, and a pool of read-only connections for View.
 // The database is in WAL mode, so reads see a consistent snapshot and don't block the
-// writer. Commits are fully synced to disk, because once the server tells a client a
-// mutation was applied, the client forgets it, so losing it would lose the change.
+// writer.
 package sqlite
 
 import (
@@ -13,13 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"runtime"
 
+	"github.com/dakribe/sync-engine/internal/sqlitedb"
 	"github.com/dakribe/sync-engine/store"
 	"github.com/dakribe/sync-engine/wire"
-
-	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
 // Store is a SQLite store.Store.
@@ -59,23 +56,17 @@ var migrations = []string{
 
 // Open opens or creates the database at path and brings its schema up to date.
 func Open(path string) (*Store, error) {
-	pragmas := url.Values{}
-	for _, p := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)"} {
-		pragmas.Add("_pragma", p)
-	}
-
-	writer, err := sql.Open("sqlite", "file:"+path+"?"+pragmas.Encode())
+	writer, err := sqlitedb.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	writer.SetMaxOpenConns(1)
-	if err := migrate(writer); err != nil {
+	if err := sqlitedb.Migrate(writer, migrations); err != nil {
 		writer.Close()
 		return nil, err
 	}
 
-	pragmas.Add("_pragma", "query_only(1)")
-	reader, err := sql.Open("sqlite", "file:"+path+"?"+pragmas.Encode())
+	reader, err := sqlitedb.Open(path, "query_only(1)")
 	if err != nil {
 		writer.Close()
 		return nil, err
@@ -83,34 +74,6 @@ func Open(path string) (*Store, error) {
 	reader.SetMaxOpenConns(max(4, runtime.NumCPU()))
 
 	return &Store{writer: writer, reader: reader}, nil
-}
-
-func migrate(db *sql.DB) error {
-	var current int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&current); err != nil {
-		return fmt.Errorf("sqlite: read schema version: %w", err)
-	}
-	if current > len(migrations) {
-		return fmt.Errorf("sqlite: database schema version %d is newer than this program (%d)", current, len(migrations))
-	}
-	for i := current; i < len(migrations); i++ {
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(migrations[i]); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("sqlite: migration %d: %w", i+1, err)
-		}
-		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, i+1)); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Update runs fn in a write transaction and commits it if fn succeeds.
